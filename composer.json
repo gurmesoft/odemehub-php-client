@@ -1,0 +1,21 @@
+{
+    "name": "gurmehub/odemehub",
+    "description": "Ödemehub ödeme geçidi için PHP istemcisi.",
+    "type": "library",
+    "license": "proprietary",
+    "require": {
+        "php": "^8.2",
+        "ext-json": "*",
+        "guzzlehttp/guzzle": "^7.8"
+    },
+    "autoload": {
+        "psr-4": {
+            "Gurmehub\\Odemehub\\": "src/"
+        }
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
