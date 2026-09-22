@@ -94,17 +94,29 @@ if ($payment->result->successful) {
 
 Başarılı yanıt **ödeme alındı demek değildir**; yalnızca müşterinin gideceği adres hazır demektir.
 
-Banka işini bitirince geçit, sonucu `callbackUrl` adresinize form olarak gönderir. Gelen postu olduğu gibi istemciye verin:
+Banka işini bitirince müşteri, tarayıcısı üzerinden `callbackUrl` adresinize döner. O POST **sonucu taşımaz**, yalnızca sonucun hazır olduğunu haber verir:
+
+| Alan | Anlamı |
+| --- | --- |
+| `transaction_id` | ödemenin geçitteki numarası |
+| `channel_reference` | sizin kendi referansınız |
+| `successful` | `1` / `0` — yalnızca ipucu, **güvenilmez** |
+
+Sonucu kendi imzalı bağlantınızdan sorun:
 
 ```php
-$outcome = $client->callback($_POST);   // imza tutmazsa SignatureException atar
+use Gurmehub\Odemehub\Request\RetrievePayment;
+
+$outcome = $client->payment(new RetrievePayment(
+    transactionId: (int) $_POST['transaction_id'],
+));
 
 if ($outcome->result->successful) {
     // siparişi ödendi olarak işaretleyin
 }
 ```
 
-İmza doğrulanmadan hiçbir şeye inanmayın: `callback()` bunu sizin için yapar ve tutmazsa istisna atar.
+Neden böyle: o POST'u bizim sunucumuz değil, müşterinin tarayıcısı gönderir; tarayıcıya imzalayacak bir sır verilemez. `successful` alanına bakıp sipariş kapatmayın — onu herkes gönderebilir; yalnız "başarısız" ipucunda gereksiz sorgudan kaçınmak için kullanın. Geçide sorduğunuz yanıt ise her zaman imzalıdır ve SDK imzayı sizin için doğrular. Başkasının işlemini sorarsanız `ValidationException` alırsınız.
 
 ## Ödeme sayfası
 
@@ -125,7 +137,117 @@ $order = $client->checkout(new Checkout(
 header('Location: '.$order->checkoutUrl);
 ```
 
-Ödeme tamamlanınca sonuç, 3D'deki ile aynı biçimde `successUrl` adresinize gönderilir ve aynı `callback()` ile okunur.
+Ödeme tamamlanınca müşteri, 3D'dekiyle aynı biçimde `successUrl` adresinize döner: aynı üç alan gelir, sonucu yine `payment()` ile sorarsınız. Müşteri ödeme sayfasında karttan kaynaklı bir hata alırsa size dönmez, sayfada kalıp başka kartla dener.
+
+## Abonelikler
+
+Müşteriden dönem dönem tahsilat yapmak için abonelik açarsınız. Neye abone olunduğu panelde tanımladığınız **abonelik ürünüdür** (Ürünler sayfası); tutarı, para birimini ve dönemini ürün taşır, burada göndermezsiniz.
+
+```php
+use Gurmehub\Odemehub\Request\Subscription;
+
+$subscription = $client->subscriptionPayment(new Subscription(
+    productId: 7,
+    channelReference: 'UYELIK-4471',
+    successUrl: 'https://magazam.com/tesekkurler',
+    customer: $customer,
+));
+
+header('Location: '.$subscription->checkoutUrl);
+```
+
+İlk ödeme her zaman geçidin kendi sayfasında yapılır ve kart zorunlu olarak saklanır: sonraki dönemler o karttan çekilir. Ödeme tamamlanınca müşteri `successUrl` adresinize döner ve sonucu yine `payment()` ile sorarsınız; abonelik `active` olur ve aşağıdaki bildirim de gider.
+
+Dönem bitince yeni dönem açılır ve müşterinin varsayılan kartından çekilir. Banka kabul etmezse çekim bir buçuk gün içinde beş kez denenir (araları 3, 6, 9 ve 12 saat); bu sırada abonelik `active` kalır. Beşinci deneme de olmazsa abonelik `past_due` olur ve müşteriye, o dönemi dilediği kartla ödeyebileceği bağlantı e-postayla gider. Süre sınırı yoktur; müşteri ödediği anda abonelik kaldığı yerden devam eder.
+
+Aboneliğin durumunu sorabilirsiniz:
+
+```php
+use Gurmehub\Odemehub\Request\RetrieveSubscription;
+
+$subscription = $client->subscription(new RetrieveSubscription(subscriptionId: 41));
+
+echo $subscription->status;      // pending | active | past_due | cancelled
+echo $subscription->amount;      // 149.90 — içinde bulunulan dönemin fiyatı
+echo $subscription->endsAt;      // sonraki tahsilat zamanı
+echo $subscription->checkoutUrl; // ödenmemiş dönem varsa müşteriye verilecek adres
+
+if ($subscription->isPastDue()) {
+    // müşteriyi kendi ödeme sayfanızda uyarabilirsiniz
+}
+```
+
+Tutar, aboneliğin **içinde bulunduğu dönemin** fiyatıdır. Ürünün fiyatını yükseltirseniz yürüyen dönem çekildiği fiyatta kalır, yeni fiyat sonraki dönemden itibaren işler.
+
+İptalde ödenmiş günler yanmaz:
+
+```php
+use Gurmehub\Odemehub\Request\CancelSubscription;
+
+$subscription = $client->cancelSubscription(new CancelSubscription(subscriptionId: 41));
+
+$subscription->cancelledAt;  // iptal edildiği an
+$subscription->endsAt;       // hizmetin süreceği son gün
+$subscription->isCancelled(); // ödenmiş dönem sürüyorsa henüz false
+```
+
+Müşteri, ödediği dönemin sonuna kadar hizmeti almaya devam eder; o güne kadar abonelik `active` görünür, dönem bitince `cancelled` olur ve bir daha tahsilat yapılmaz. Ödenmemiş bir aboneliğin (ilk ödemesi yapılmamış ya da `past_due`) iptali hemen geçerlidir. İade yapılmaz.
+
+Aboneliğin açılabilmesi için varsayılan ödeme hesabınızın kart saklayabiliyor olması gerekir; saklamayan bir hesapla açmaya çalışırsanız istek `subscription.payment_provider_id` alanında reddedilir.
+
+### Abonelik bildirimleri (webhook)
+
+Abonelik açarken `webhookUrl` verirseniz, aboneliğin durumu her değiştiğinde o adrese imzalı bir POST gönderilir. Gövde düz JSON'dur ve imza `X-Signature` başlığındadır — yani geçidin API yanıtlarıyla aynı yöntem.
+
+```php
+use Gurmehub\Odemehub\Request\Subscription;
+
+$subscription = $client->subscriptionPayment(new Subscription(
+    productId: 7,
+    channelReference: 'UYELIK-4471',
+    successUrl: 'https://magazam.com/tesekkurler',
+    customer: $customer,
+    webhookUrl: 'https://magazam.com/odemehub/abonelik',
+));
+```
+
+Bildirimi karşılayan uçta gövdeyi ham okuyup imzayla birlikte SDK'ya verin:
+
+```php
+use Gurmehub\Odemehub\Exception\SignatureException;
+
+try {
+    $webhook = $client->subscriptionWebhook(
+        file_get_contents('php://input'),
+        $_SERVER['HTTP_X_SIGNATURE'] ?? null,
+    );
+} catch (SignatureException $exception) {
+    http_response_code(400);
+    exit;
+}
+
+$subscription = $webhook->subscription;   // sorgudakiyle aynı nesne
+
+match (true) {
+    $webhook->isActive() => aboneligiAc($subscription->channelReference, $subscription->endsAt),
+    $webhook->isPastDue() => musteriyiUyar($subscription->checkoutUrl),
+    $webhook->isCancelled() => yenilemeyiDurdur($subscription->endsAt),
+    $webhook->isEnded() => erisimiKapat($subscription->channelReference),
+};
+
+http_response_code(200);
+```
+
+Gönderilen olaylar aboneliğin **durumudur**, yapılan işlem değil:
+
+| Olay | Ne zaman gider |
+| --- | --- |
+| `active` | bir dönem ödendi (ilk ödeme ya da yenileme) |
+| `past_due` | dönem kayıtlı karttan tahsil edilemedi, müşteriden bekleniyor |
+| `cancelled` | abonelik iptal edildi; müşteri `endsAt` tarihine kadar hizmeti almaya devam eder |
+| `ended` | ödenmiş dönem doldu, abonelik kapandı |
+
+2xx dışında bir yanıt (ya da yanıtsızlık) başarısız sayılır; bildirim 5 dakika sonra bir kez daha denenir. Ulaşmayan bildirimler panelde aboneliğin sayfasında HTTP kodu ve yanıtıyla listelenir.
 
 ## Kart sorgusu ve taksitler
 

@@ -67,6 +67,47 @@ final class Client
     }
 
     /**
+     * Open a subscription to be paid for the first time on the gateway's
+     * own page. Nothing is charged here; the customer is sent to the
+     * address that comes back and pays there, and the periods after that
+     * are taken from the card they pay with.
+     */
+    public function subscriptionPayment(Request\Subscription $subscription): Response\Subscription
+    {
+        return Response\Subscription::fromArray($this->send($subscription));
+    }
+
+    /**
+     * Where a subscription stands: what it is for, the period it is on and
+     * whether that period has been paid for.
+     */
+    public function subscription(Request\RetrieveSubscription $subscription): Response\Subscription
+    {
+        return Response\Subscription::fromArray($this->send($subscription));
+    }
+
+    /**
+     * Call a subscription off. Nothing is given back: the customer keeps
+     * the days they have already paid for and is served to the end of
+     * them, and nothing is charged after that.
+     */
+    public function cancelSubscription(Request\CancelSubscription $subscription): Response\Subscription
+    {
+        return Response\Subscription::fromArray($this->send($subscription));
+    }
+
+    /**
+     * How a payment went. A customer sent to their bank comes back to the
+     * merchant with the payment's number and a hint at how it went; the
+     * hint is worth nothing on its own, and this is the call that says
+     * what really became of it.
+     */
+    public function payment(Request\RetrievePayment $payment): Response\Payment
+    {
+        return Response\Payment::fromArray($this->send($payment));
+    }
+
+    /**
      * Give money back out of a payment the provider has settled, whole or
      * in part. A refund that names no amount gives back everything the
      * payment has left in it.
@@ -129,23 +170,27 @@ final class Client
     }
 
     /**
-     * Read the outcome the gateway posted back to this merchant once the
-     * customer had been through their bank, or once an order was paid on
-     * the checkout page. Hand it the whole post; nothing in it is believed
-     * until the signature beside it is checked against the secret.
+     * Read a word the gateway sent about a subscription: it is posted to
+     * the address the subscription was opened with, as plain JSON signed
+     * in the `X-Signature` header. Hand it the body exactly as it arrived,
+     * character for character, together with the header; nothing in it is
+     * believed until the signature is checked against the secret.
      *
-     * @param  array<string, mixed>  $post  The posted fields, as they arrived.
+     * Later kinds of word — one about a payment, say — will be read by
+     * their own method, so this one says which it is about.
+     *
+     * @param  string  $payload  The request body, read raw: file_get_contents('php://input').
+     * @param  string|null  $signature  The `X-Signature` header, as it arrived.
+     *
+     * @throws SignatureException
      */
-    public function callback(array $post): Response\Callback
+    public function subscriptionWebhook(string $payload, ?string $signature): Response\SubscriptionWebhook
     {
-        $payload = $post[Response\Callback::PAYLOAD_FIELD] ?? null;
-        $signature = $post[Response\Callback::SIGNATURE_FIELD] ?? null;
-
-        if (! is_string($payload) || ! $this->signature->verify($payload, is_string($signature) ? $signature : null)) {
+        if (! $this->signature->verify($payload, $signature)) {
             throw new SignatureException('Bildirimin imzası doğrulanamadı; bildirim ödeme geçidinden gelmemiş olabilir.');
         }
 
-        return Response\Callback::fromArray($this->decode($payload, 0));
+        return Response\SubscriptionWebhook::fromArray($this->decode($payload, 0));
     }
 
     /**
